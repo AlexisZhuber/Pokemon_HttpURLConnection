@@ -5,11 +5,14 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Color.Companion.White
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -19,43 +22,45 @@ import com.example.http_project.model.PokemonResult
 import com.example.http_project.ui.theme.BackgroundColor
 import com.example.http_project.ui.theme.CardColor
 import com.example.http_project.ui.theme.ErrorColor
-import com.example.http_project.ui.theme.PrimaryColor
 import com.example.http_project.ui.theme.TextColor
 import com.example.http_project.util.getTypeBackgroundBrush
 import com.example.http_project.viewmodel.PokemonViewModel
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filter
 
 /**
- * Main view that displays the Pokemon list and manages
- * the state of selected Pokemon to show in a detail dialog.
- *
- * Now includes a search bar to filter the local list by name or ID.
+ * Main screen that shows:
+ * 1) A search bar for exact name/ID (from PokeAPI) with a search icon button.
+ * 2) If a search result is found, displays it with a full-type-color background.
+ * 3) Otherwise, displays the paginated list (auto-load on scroll).
+ * 4) Displays a detail dialog for any selected Pokemon, centered.
  */
 @Composable
 fun PokemonListView(
     viewModel: PokemonViewModel,
     paddingValues: PaddingValues
 ) {
-    // Observe states from ViewModel
-    val pokemonListResponse by viewModel.pokemonListState.collectAsState()
+    val pokemonList by viewModel.pokemonListState.collectAsState()
     val selectedPokemonDetail by viewModel.selectedPokemonDetail.collectAsState()
     val errorMessage by viewModel.errorState.collectAsState()
+    val searchResult by viewModel.searchResult.collectAsState()
 
-    // Text state for search
+    // Local state for the search text
     var searchText by remember { mutableStateOf("") }
 
-    // Fetch the pokemon list when entering this screen
+    // On first load, fetch initial page
     LaunchedEffect(Unit) {
-        viewModel.fetchPokemonList()
+        viewModel.fetchInitialPage()
     }
 
-    // UI content
+    // UI
     Box(
         modifier = Modifier
             .fillMaxSize()
             .padding(paddingValues)
-            .background(BackgroundColor) // Apply background color
+            .background(BackgroundColor)
     ) {
-        // If there's an error, display it in the center
+        // If there's an error, show it centered
         errorMessage?.let { error ->
             Text(
                 text = "Error: $error",
@@ -64,124 +69,156 @@ fun PokemonListView(
             )
         }
 
-        // If the list is null and there's no error, show a loading indicator
-        if (pokemonListResponse == null && errorMessage == null) {
-            CircularProgressIndicator(
-                modifier = Modifier.align(Alignment.Center),
-                color = PrimaryColor
+        Column(modifier = Modifier.fillMaxSize()) {
+            // Search bar with a trailing icon (lupa)
+            OutlinedTextField(
+                value = searchText,
+                onValueChange = { newText ->
+                    // We only update the text in state;
+                    // search happens when user presses the icon
+                    searchText = newText
+                },
+                label = { Text("Search Pokémon by name or ID") },
+                singleLine = true, // Only one line
+                trailingIcon = {
+                    IconButton(onClick = {
+                        // Search only when icon is pressed
+                        if (searchText.isBlank()) {
+                            viewModel.clearSearchResult()
+                        } else {
+                            viewModel.searchPokemon(searchText)
+                        }
+                    }) {
+                        Icon(imageVector = Icons.Default.Search, contentDescription = "Search Icon")
+                    }
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(8.dp)
             )
-        } else {
-            // If we have a list of Pokemons, show the search bar + filtered list
-            pokemonListResponse?.results?.let { results ->
-                Column(modifier = Modifier.fillMaxSize()) {
-                    // Search Bar
-                    SearchBar(
-                        searchText = searchText,
-                        onSearchTextChange = { newText ->
-                            searchText = newText
-                        }
-                    )
 
-                    // Filter the Pokemon list
-                    val filteredPokemons = filterPokemonsBySearch(
-                        pokemons = results,
-                        query = searchText
-                    )
-
-                    // Display the filtered list
-                    PokemonList(
-                        pokemons = filteredPokemons,
-                        onItemClick = { pokemon ->
-                            viewModel.fetchPokemonDetail(pokemon.url)
-                        }
-                    )
-                }
+            // If we have a search result, show it
+            if (searchResult != null) {
+                SearchResultCard(
+                    pokemonDetail = searchResult,
+                    onClick = { detail ->
+                        // If user clicks on the card, open the dialog
+                        viewModel.closeSearchAndOpenDetail(detail)
+                    }
+                )
+            } else {
+                // Otherwise, show the paginated list
+                PaginatedPokemonList(
+                    pokemonList = pokemonList,
+                    onPokemonClick = { result ->
+                        viewModel.fetchPokemonDetail(result.url)
+                    },
+                    onLoadNextPage = {
+                        viewModel.loadNextPage()
+                    }
+                )
             }
         }
     }
 
-    // Show detail dialog if we have a selected Pokemon
+    // Detail dialog if a Pokemon is selected
     selectedPokemonDetail?.let { detail ->
         PokemonDetailDialog(
             detail = detail,
-            onClose = { viewModel.closeDetailDialog() }
+            onDismiss = { viewModel.closeDetailDialog() }
         )
     }
 }
 
 /**
- * Renders a simple search bar using OutlinedTextField.
- * The user can type a name or ID for filtering.
+ * Shows a single Pokemon card with a background color/gradient
+ * that covers the entire card area.
  */
 @Composable
-fun SearchBar(
-    searchText: String,
-    onSearchTextChange: (String) -> Unit
+fun SearchResultCard(
+    pokemonDetail: PokemonDetailResponse?,
+    onClick: (PokemonDetailResponse) -> Unit
 ) {
-    OutlinedTextField(
-        value = searchText,
-        onValueChange = onSearchTextChange,
-        label = { Text("Search by name or ID") },
+    if (pokemonDetail == null) return
+
+    val backgroundBrush = getTypeBackgroundBrush(pokemonDetail.types)
+
+    // Card with transparent container so that the brush fully covers the card area
+    Card(
         modifier = Modifier
-            .fillMaxWidth()
             .padding(8.dp)
-    )
-}
-
-/**
- * Filters a list of Pokemon by name or ID.
- * - If the user enters digits, we parse them as an ID.
- * - Otherwise, we do a contains() match by name.
- */
-fun filterPokemonsBySearch(
-    pokemons: List<PokemonResult>,
-    query: String
-): List<PokemonResult> {
-    if (query.isBlank()) return pokemons
-
-    val trimmed = query.trim().lowercase()
-
-    // If the user typed a number, try to match ID
-    val possibleId = trimmed.toIntOrNull()
-    return if (possibleId != null) {
-        // Filter by ID
-        pokemons.filter { pokemon ->
-            parseIdFromUrl(pokemon.url) == possibleId
-        }
-    } else {
-        // Filter by name containing the query
-        pokemons.filter { pokemon ->
-            pokemon.name.contains(trimmed, ignoreCase = true)
+            .fillMaxWidth()
+            .clickable { onClick(pokemonDetail) },
+        colors = CardDefaults.cardColors(containerColor = Color.Transparent),
+        elevation = CardDefaults.cardElevation(4.dp)
+    ) {
+        // Fill the entire Card area with the type-based background
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(backgroundBrush)
+                .padding(16.dp)
+        ) {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    text = pokemonDetail.name.uppercase(),
+                    fontWeight = FontWeight.Bold,
+                    color = White
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                AsyncImage(
+                    model = pokemonDetail.spriteUrl,
+                    contentDescription = pokemonDetail.name,
+                    modifier = Modifier.size(120.dp)
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(text = "ID: ${pokemonDetail.id}", color = White)
+                Text(text = "Types: ${pokemonDetail.types.joinToString()}", color = White)
+            }
         }
     }
 }
 
 /**
- * Renders a lazy column of Pokemon items.
- *
- * @param pokemons The list of Pokemon results from the API.
- * @param onItemClick Callback when a user clicks on a pokemon item.
+ * Displays a LazyColumn of PokemonResults with infinite scroll:
+ * loads the next page when the user reaches the end of the list.
  */
 @Composable
-fun PokemonList(
-    pokemons: List<PokemonResult>,
-    onItemClick: (PokemonResult) -> Unit
+fun PaginatedPokemonList(
+    pokemonList: List<PokemonResult>,
+    onPokemonClick: (PokemonResult) -> Unit,
+    onLoadNextPage: () -> Unit
 ) {
+    val listState = rememberLazyListState()
+
+    // Detect when we reach the end of the list to load the next page
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index }
+            .distinctUntilChanged()
+            .filter { lastVisibleIndex ->
+                lastVisibleIndex != null && lastVisibleIndex >= pokemonList.lastIndex
+            }
+            .collect {
+                onLoadNextPage()
+            }
+    }
+
     LazyColumn(
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(8.dp) // small padding around the entire list
+        state = listState,
+        modifier = Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        items(pokemons) { pokemon ->
-            // Each item is clickable to load detail
+        items(pokemonList) { pokemon ->
             Card(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable { onItemClick(pokemon) },
-                colors = CardDefaults.cardColors(
-                    containerColor = CardColor
-                ),
+                    .clickable { onPokemonClick(pokemon) }
+                    .padding(horizontal = 8.dp),
+                colors = CardDefaults.cardColors(containerColor = CardColor),
                 elevation = CardDefaults.cardElevation(4.dp)
             ) {
                 Text(
@@ -196,55 +233,46 @@ fun PokemonList(
 }
 
 /**
- * AlertDialog showing a Pokemon's basic details,
- * including an image loaded by Coil, centered for a nice appearance.
- *
- * The background depends on the Pokemon's types (solid or gradient).
+ * Detail dialog for the selected Pokemon, with background gradient based on types,
+ * and fully centered content.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PokemonDetailDialog(
     detail: PokemonDetailResponse,
-    onClose: () -> Unit
+    onDismiss: () -> Unit
 ) {
-    // Brush for background based on Pokemon types
     val backgroundBrush = getTypeBackgroundBrush(detail.types)
 
     AlertDialog(
-        onDismissRequest = onClose,
+        onDismissRequest = onDismiss,
         title = {
-            // Centered title
             Box(
                 modifier = Modifier.fillMaxWidth(),
                 contentAlignment = Alignment.Center
             ) {
-                Text(
-                    text = detail.name.uppercase(),
-                    fontWeight = FontWeight.Bold
-                )
+                Text(detail.name.uppercase(), fontWeight = FontWeight.Bold)
             }
         },
         text = {
+            // Center everything vertically as well
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(min = 200.dp)
-                    .background(backgroundBrush)
-                    .padding(16.dp)
+                    .heightIn(min = 250.dp) // a bit more space
+                    .background(backgroundBrush),
+                contentAlignment = Alignment.Center // center child vertically and horizontally
             ) {
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
-                    modifier = Modifier.fillMaxWidth()
+                    verticalArrangement = Arrangement.Center,
+                    modifier = Modifier.padding(16.dp)
                 ) {
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    // Sprite image
                     AsyncImage(
                         model = detail.spriteUrl,
                         contentDescription = detail.name,
-                        modifier = Modifier.size(120.dp)
+                        modifier = Modifier.size(140.dp)
                     )
-
                     Spacer(modifier = Modifier.height(12.dp))
                     Text(text = "ID: ${detail.id}", color = White)
                     Text(text = "Height: ${detail.height}", color = White)
@@ -257,19 +285,9 @@ fun PokemonDetailDialog(
             }
         },
         confirmButton = {
-            Button(onClick = onClose) {
+            Button(onClick = onDismiss) {
                 Text("Close")
             }
         }
     )
-}
-
-/**
- * Extract the Pokemon ID from the PokeAPI URL.
- * Example: "https://pokeapi.co/api/v2/pokemon/25/" -> returns 25
- */
-fun parseIdFromUrl(url: String): Int? {
-    val regex = Regex(".*/(\\d+)/?")
-    val matchResult = regex.find(url) ?: return null
-    return matchResult.groupValues.getOrNull(1)?.toIntOrNull()
 }

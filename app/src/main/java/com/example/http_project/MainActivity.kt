@@ -5,12 +5,19 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.unit.dp
 import com.example.http_project.remote.RemoteDataSource
 import com.example.http_project.repository.PokemonRepository
 import com.example.http_project.ui.theme.Http_projectTheme
@@ -52,7 +59,16 @@ class MainActivity : ComponentActivity() {
                             },
                             colors = TopAppBarDefaults.topAppBarColors(
                                 containerColor = PrimaryColor
-                            )
+                            ),
+                            actions = {
+                                // Este composable se coloca a la derecha
+                                Icon(
+                                    painter = painterResource(id = R.drawable.pokeball),
+                                    contentDescription = "Pokeball Icon",
+                                    tint = Color.Unspecified, // Mantiene el color original
+                                    modifier = Modifier.size(48.dp).padding(end = 16.dp)
+                                )
+                            }
                         )
                     }
                 ) { padding ->
